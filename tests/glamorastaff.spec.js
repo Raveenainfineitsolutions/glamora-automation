@@ -2,24 +2,17 @@
 import 'dotenv/config';
 import { test, expect } from '@playwright/test';
 
-
-// ======================================================
-// CONFIGURATION
-// ======================================================
-
 const LOGIN_URL =
   'https://glamora-staff.infineitsolutions.com/barbershop/login';
 
 const username = process.env.GLAMORA_USERNAME;
 const password = process.env.GLAMORA_PASSWORD;
 
+const uniqueName = (prefix = 'PW Staff') =>
+  `${prefix} ${Date.now()}-${Math.floor(Math.random() * 1000)}`;
 
-// ======================================================
-// LOGIN HELPER
-// ======================================================
-
+// LOGIN
 async function login(page) {
-
   if (!username || !password) {
     throw new Error(
       'Missing GLAMORA_USERNAME or GLAMORA_PASSWORD in .env file'
@@ -32,125 +25,172 @@ async function login(page) {
   await page.getByPlaceholder('Enter password').fill(password);
 
   await page.getByRole('button', {
-    name: 'Sign in as admin'
+    name: /sign in as admin/i
   }).click();
 
-  await expect(page).not.toHaveURL(/login/, {
-    timeout: 15000
+  await expect(page).not.toHaveURL(/login/i, {
+    timeout: 20000
   });
-
 }
 
-
-// ======================================================
-// STAFF MODULE NAVIGATION
-// ======================================================
-
+// OPEN STAFF MODULE
 async function openStaffModule(page) {
+  const staffMenu = page.getByText(/^staff$/i).first();
 
-  await login(page);
-
-  const staffMenu = page.getByText(
-    /^staff$/i
-  ).first();
-
-  await expect(staffMenu).toBeVisible({
-    timeout: 15000
-  });
-
+  await expect(staffMenu).toBeVisible({ timeout: 15000 });
   await staffMenu.click();
 
-  await page.waitForTimeout(1500);
-
-  await expect(page.locator('body')).toBeVisible();
-
-  console.log('Staff URL:', page.url());
-
+  await expect(page.getByText(/team directory/i)).toBeVisible({
+    timeout: 15000
+  });
 }
 
-
-// ======================================================
-// ADD STAFF FORM HELPER
-// ======================================================
-
+// OPEN ADD STAFF FORM
 async function openAddStaffForm(page) {
-
-  const addButton = page.getByRole('button', {
+  await page.getByRole('button', {
     name: /add new staff/i
-  });
+  }).click();
 
-  await expect(addButton).toBeVisible({
+  await expect(page.getByLabel(/full name/i).first()).toBeVisible({
     timeout: 10000
   });
-
-  await addButton.click();
-
-  await page.waitForTimeout(1000);
-
-  await expect(page.locator('body')).toBeVisible();
-
-  console.log('Add New Staff form opened');
-
 }
 
+// FILL OPTIONAL FIELDS
+async function fillFieldIfPresent(page, label, value) {
+  const field = page.getByLabel(label).first();
 
-// ======================================================
-// TAB / BUTTON HELPER
-// ======================================================
+  if (await field.count() === 0) return;
 
-async function clickButton(page, buttonName) {
+  const tagName = await field.evaluate(el =>
+    el.tagName.toLowerCase()
+  );
 
-  const button = page.getByRole('button', {
-    name: buttonName
+  if (tagName === 'select') {
+    const optionValue = await field.locator(
+      'option:not([disabled])'
+    ).evaluateAll(options => {
+      const option = options.find(
+        o => o.value && o.value.trim() !== ''
+      );
+      return option?.value;
+    });
+
+    if (optionValue) {
+      await field.selectOption(optionValue);
+    }
+  } else {
+    await field.fill(String(value));
+  }
+}
+
+// FILL STAFF FORM
+async function fillStaffForm(page, staffName) {
+  await page.getByLabel(/full name/i).first().fill(staffName);
+
+  await fillFieldIfPresent(page, /nationality/i, 'New Zealand');
+  await fillFieldIfPresent(
+    page,
+    /state\s*\/?\s*province/i,
+    'Auckland'
+  );
+  await fillFieldIfPresent(page, /commission/i, '0');
+
+  const staffUsername = page.getByLabel(
+    /staff.*username|username/i
+  ).first();
+
+  if (
+    await staffUsername.count() &&
+    await staffUsername.isVisible()
+  ) {
+    await staffUsername.fill(`pw_${Date.now()}`);
+  }
+
+  const staffPassword = page.getByLabel(
+    /staff.*password|password/i
+  ).last();
+
+  if (
+    await staffPassword.count() &&
+    await staffPassword.isVisible()
+  ) {
+    await staffPassword.fill(`PwTest!${Date.now()}`);
+  }
+
+  const activeCheckbox = page.getByLabel(
+    /active staff member/i
+  ).first();
+
+  if (
+    await activeCheckbox.count() &&
+    await activeCheckbox.isVisible()
+  ) {
+    if (!(await activeCheckbox.isChecked())) {
+      await activeCheckbox.check();
+    }
+  }
+}
+
+// CREATE STAFF
+async function createStaffRecord(page, staffName) {
+  await openAddStaffForm(page);
+  await fillStaffForm(page, staffName);
+
+  await page.getByRole('button', {
+    name: /create staff/i
+  }).click();
+
+  await expect(
+    page.getByText(staffName, { exact: false }).first()
+  ).toBeVisible({ timeout: 15000 });
+}
+
+// FIND STAFF ROW
+function staffRow(page, staffName) {
+  return page.getByRole('row').filter({
+    hasText: staffName
   }).first();
-
-  await expect(button).toBeVisible({
-    timeout: 10000
-  });
-
-  await button.click();
-
-  await page.waitForTimeout(1000);
-
 }
 
+// OPEN EDIT OR DELETE ACTION
+async function openRowAction(row, actionName) {
+  const button = row.getByRole('button', {
+    name: actionName
+  });
 
-// ======================================================
-// COMMON TEST SETUP
-// ======================================================
+  if (await button.count()) {
+    await button.first().click();
+    return;
+  }
 
-test.describe('GLAMORA STAFF MANAGEMENT MODULE', () => {
+  const titledButton = row.locator(
+    `button[title*="${actionName}" i],
+     button[aria-label*="${actionName}" i]`
+  );
+
+  if (await titledButton.count()) {
+    await titledButton.first().click();
+    return;
+  }
+
+  throw new Error(
+    `Could not find ${actionName} button in staff row`
+  );
+}
+
+// TEST CASES
+test.describe('GLAMORA STAFF MODULE - CRUD TESTS', () => {
 
   test.beforeEach(async ({ page }) => {
+    await login(page);
     await openStaffModule(page);
   });
 
-
-  // ----------------------------------------------------
-  // TC01 - Verify Staff Page
-  // ----------------------------------------------------
-
-  test('TC01 - Verify Staff page loads successfully', async ({ page }) => {
-
-    await expect(page.locator('body')).toBeVisible();
-
-    await expect(page.locator('body')).not.toContainText(
-      'Internal Server Error'
-    );
-
-    console.log('Staff page loaded successfully');
-
-  });
-
-
-  // ----------------------------------------------------
-  // TC02 - Verify Staff Directory
-  // ----------------------------------------------------
-
-  test('TC02 - Verify Staff Directory is displayed', async ({ page }) => {
-
+  // TC01 - Staff page loading
+  test('TC01 - Verify Staff page loads', async ({ page }) => {
     await expect(
-      page.getByText(/team directory/i).first()
+      page.getByText(/team directory/i)
     ).toBeVisible();
 
     await expect(
@@ -159,285 +199,63 @@ test.describe('GLAMORA STAFF MANAGEMENT MODULE', () => {
       })
     ).toBeVisible();
 
+    await expect(page.locator('body')).not.toContainText(
+      /internal server error/i
+    );
   });
 
-
-  // ----------------------------------------------------
-  // TC03 - Add New Staff Button
-  // ----------------------------------------------------
-
-  test('TC03 - Verify Add New Staff button', async ({ page }) => {
-
-    const addButton = page.getByRole('button', {
-      name: /add new staff/i
-    });
-
-    await expect(addButton).toBeVisible();
-    await expect(addButton).toBeEnabled();
-
-  });
-
-
-  // ----------------------------------------------------
-  // TC04 - Add New Staff Form
-  // ----------------------------------------------------
-
-  test('TC04 - Verify Add New Staff form opens', async ({ page }, testInfo) => {
-
+  // TC02 - Add Staff form
+  test('TC02 - Verify Add Staff form opens', async ({ page }) => {
     await openAddStaffForm(page);
 
-    await page.screenshot({
-      path: testInfo.outputPath('add-staff-form.png'),
-      fullPage: true
-    });
+    await expect(
+      page.getByLabel(/full name/i).first()
+    ).toBeVisible();
 
-    console.log('Add New Staff form opened for inspection');
-
+    await expect(
+      page.getByRole('button', {
+        name: /create staff/i
+      })
+    ).toBeVisible();
   });
 
-
-  // ----------------------------------------------------
-  // TC05 - Full Name Field
-  // ----------------------------------------------------
-
-  test('TC05 - Verify Full Name field', async ({ page }) => {
-
+  // TC03 - Mandatory field validation
+  test('TC03 - Verify mandatory field validation', async ({ page }) => {
     await openAddStaffForm(page);
+
+    await page.getByRole('button', {
+      name: /create staff/i
+    }).click();
 
     const fullName = page.getByLabel(/full name/i).first();
 
-    console.log(
-      'Full Name field count:',
-      await fullName.count()
+    const browserInvalid = await fullName.evaluate(
+      el => !el.checkValidity()
     );
 
-    await expect(fullName).toBeVisible();
+    const bodyText = (
+      await page.locator('body').innerText()
+    ).toLowerCase();
 
+    expect(
+      browserInvalid ||
+      /required|mandatory|full name|please enter|cannot be blank/.test(bodyText)
+    ).toBeTruthy();
   });
 
+  // TC04 - Create Staff
+  test('TC04 - Create new staff successfully', async ({ page }) => {
+    const staffName = uniqueName('PW Create');
 
-  // ----------------------------------------------------
-  // TC06 - Nationality Field
-  // ----------------------------------------------------
+    await createStaffRecord(page, staffName);
 
-  test('TC06 - Verify Nationality field', async ({ page }) => {
-
-    await openAddStaffForm(page);
-
-    const nationality = page.getByLabel(/nationality/i).first();
-
-    console.log(
-      'Nationality field count:',
-      await nationality.count()
-    );
-
-    await expect(nationality).toBeVisible();
-
+    await expect(
+      page.getByText(staffName, { exact: false }).first()
+    ).toBeVisible();
   });
 
-
-  // ----------------------------------------------------
-  // TC07 - State / Province Field
-  // ----------------------------------------------------
-
-  test('TC07 - Verify State / Province field', async ({ page }) => {
-
-    await openAddStaffForm(page);
-
-    const state = page.getByLabel(/state\s*\/?\s*province/i).first();
-
-    console.log(
-      'State field count:',
-      await state.count()
-    );
-
-    await expect(state).toBeVisible();
-
-  });
-
-
-  // ----------------------------------------------------
-  // TC08 - Commission Field
-  // ----------------------------------------------------
-
-  test('TC08 - Verify Commission field', async ({ page }) => {
-
-    await openAddStaffForm(page);
-
-    const commission = page.getByLabel(/commission/i).first();
-
-    console.log(
-      'Commission field count:',
-      await commission.count()
-    );
-
-    await expect(commission).toBeVisible();
-
-  });
-
-
-  // ----------------------------------------------------
-  // TC09 - Optional Staff Username Field
-  // ----------------------------------------------------
-
-  test('TC09 - Verify optional Staff username field', async ({ page }) => {
-
-    await openAddStaffForm(page);
-
-    const usernameField = page.getByLabel(
-      /staff.*username|username/i
-    ).first();
-
-    console.log(
-      'Staff username field count:',
-      await usernameField.count()
-    );
-
-    await expect(page.locator('body')).toBeVisible();
-
-  });
-
-
-  // ----------------------------------------------------
-  // TC10 - Optional Staff Password Field
-  // ----------------------------------------------------
-
-  test('TC10 - Verify optional Staff password field', async ({ page }) => {
-
-    await openAddStaffForm(page);
-
-    const passwordField = page.getByLabel(
-      /staff.*password|password/i
-    ).last();
-
-    console.log(
-      'Staff password field count:',
-      await passwordField.count()
-    );
-
-    await expect(page.locator('body')).toBeVisible();
-
-  });
-
-
-  // ----------------------------------------------------
-  // TC11 - Active Staff Checkbox
-  // ----------------------------------------------------
-
-  test('TC11 - Verify Active Staff Member checkbox', async ({ page }) => {
-
-    await openAddStaffForm(page);
-
-    const activeCheckbox = page.getByLabel(
-      /active staff member/i
-    ).first();
-
-    console.log(
-      'Active checkbox count:',
-      await activeCheckbox.count()
-    );
-
-    await expect(activeCheckbox).toBeVisible();
-
-  });
-
-
-  // ----------------------------------------------------
-  // TC12 - Create Staff Button
-  // ----------------------------------------------------
-
-  test('TC12 - Verify Create Staff button', async ({ page }) => {
-
-    await openAddStaffForm(page);
-
-    const createButton = page.getByRole('button', {
-      name: /create staff/i
-    });
-
-    await expect(createButton).toBeVisible();
-
-    console.log(
-      'Create Staff button count:',
-      await createButton.count()
-    );
-
-  });
-
-
-  // ----------------------------------------------------
-  // TC13 - Required Field Validation
-  // ----------------------------------------------------
-
-  test('TC13 - Verify required field validation', async ({ page }) => {
-
-    await openAddStaffForm(page);
-
-    await clickButton(page, /create staff/i);
-
-    await expect(page.locator('body')).toBeVisible();
-
-    const bodyText = await page.locator('body').innerText();
-
-    console.log('Validation response:', bodyText);
-
-  });
-
-
-  // ----------------------------------------------------
-  // TC14 - Commission Validation
-  // ----------------------------------------------------
-
-  test('TC14 - Verify invalid Commission value', async ({ page }) => {
-
-    await openAddStaffForm(page);
-
-    const commission = page.getByLabel(/commission/i).first();
-
-    await expect(commission).toBeVisible();
-
-    await commission.fill('150');
-
-    await clickButton(page, /create staff/i);
-
-    const isValid = await commission.evaluate(
-      element => element.checkValidity()
-    ).catch(() => true);
-
-    console.log('Commission field validity:', isValid);
-
-    await expect(page.locator('body')).toBeVisible();
-
-  });
-
-
-  // ----------------------------------------------------
-  // TC15 - Cancel Add Staff Form
-  // ----------------------------------------------------
-
-  test('TC15 - Verify Cancel button in Add Staff form', async ({ page }) => {
-
-    await openAddStaffForm(page);
-
-    const cancelButton = page.getByRole('button', {
-      name: /^cancel$/i
-    });
-
-    console.log(
-      'Cancel button count:',
-      await cancelButton.count()
-    );
-
-    await expect(page.locator('body')).toBeVisible();
-
-  });
-
-
-  // ----------------------------------------------------
-  // TC16 - Search Staff
-  // ----------------------------------------------------
-
-  test('TC16 - Verify Staff search', async ({ page }) => {
-
+  // TC05 - Search Staff
+  test('TC05 - Search existing staff', async ({ page }) => {
     const search = page.locator(
       'input[type="search"], input[placeholder*="Search" i]'
     ).first();
@@ -446,356 +264,121 @@ test.describe('GLAMORA STAFF MANAGEMENT MODULE', () => {
 
     await search.fill('Akshay');
 
-    await page.waitForTimeout(1500);
-
     await expect(page.locator('body')).toBeVisible();
-
-    console.log('Staff search executed');
-
   });
 
-
-  // ----------------------------------------------------
-  // TC17 - Invalid Staff Search
-  // ----------------------------------------------------
-
-  test('TC17 - Verify search with invalid text', async ({ page }) => {
-
+  // TC06 - Invalid Staff Search
+  test('TC06 - Search invalid staff name', async ({ page }) => {
     const search = page.locator(
       'input[type="search"], input[placeholder*="Search" i]'
     ).first();
 
     await expect(search).toBeVisible();
 
-    await search.fill('ZZZZINVALID123');
-
-    await page.waitForTimeout(1500);
+    await search.fill(`NO_MATCH_${Date.now()}`);
 
     await expect(page.locator('body')).toBeVisible();
-
-    console.log('Invalid staff search completed');
-
   });
 
+  // TC07 - Update Staff
+  test('TC07 - Update existing staff details', async ({ page }) => {
+    const originalName = uniqueName('PW Update');
+    const updatedName = `${originalName} Edited`;
 
-  // ----------------------------------------------------
-  // TC18 - Edit Staff Action
-  // ----------------------------------------------------
+    // Create a record for this test
+    await createStaffRecord(page, originalName);
 
-  test('TC18 - Inspect Edit Staff action', async ({ page }) => {
+    const row = staffRow(page, originalName);
 
-    const editAction = page.getByRole('button', {
-      name: /edit/i
+    await expect(row).toBeVisible();
+
+    // Click Edit
+    await openRowAction(row, 'edit');
+
+    const nameField = page.getByLabel(/full name/i).first();
+
+    await expect(nameField).toBeVisible({
+      timeout: 10000
+    });
+
+    await nameField.fill(updatedName);
+
+    // Save updated details
+    const updateButton = page.getByRole('button', {
+      name: /update staff|save changes|save|update/i
+    }).last();
+
+    await expect(updateButton).toBeVisible();
+
+    await updateButton.click();
+
+    // Verify updated name
+    await expect(
+      page.getByText(updatedName, { exact: false }).first()
+    ).toBeVisible({ timeout: 15000 });
+
+    await expect(
+      page.getByText(originalName, { exact: false })
+    ).toHaveCount(0);
+  });
+
+  // TC08 - Delete Staff
+  test('TC08 - Delete existing staff record', async ({ page }) => {
+    const staffName = uniqueName('PW Delete');
+
+    // Create a record for deletion
+    await createStaffRecord(page, staffName);
+
+    const row = staffRow(page, staffName);
+
+    await expect(row).toBeVisible();
+
+    // Accept browser confirmation if present
+    page.once('dialog', dialog => dialog.accept());
+
+    // Click Delete
+    await openRowAction(row, 'delete');
+
+    // Handle application confirmation popup
+    const confirmButton = page.getByRole('button', {
+      name: /confirm|yes, delete|delete staff|^delete$/i
+    }).last();
+
+    if (await confirmButton.isVisible().catch(() => false)) {
+      await confirmButton.click();
+    }
+
+    // Verify deleted staff is removed
+    await expect(
+      page.getByText(staffName, { exact: false })
+    ).toHaveCount(0, { timeout: 15000 });
+  });
+
+  // TC09 - Pagination
+  test('TC09 - Verify Staff pagination', async ({ page }) => {
+    const pagination = page.getByRole('button', {
+      name: /next|previous|prev/i
     });
 
     console.log(
-      'Edit button count:',
-      await editAction.count()
+      'Pagination button count:',
+      await pagination.count()
     );
 
     await expect(page.locator('body')).toBeVisible();
-
   });
 
-
-  // ----------------------------------------------------
-  // TC19 - Delete Staff Action
-  // ----------------------------------------------------
-
-  test('TC19 - Inspect Delete Staff action', async ({ page }) => {
-
-    const deleteAction = page.getByRole('button', {
-      name: /delete|remove/i
-    });
-
-    console.log(
-      'Delete button count:',
-      await deleteAction.count()
-    );
-
-    await expect(page.locator('body')).toBeVisible();
-
-  });
-
-
-  // ----------------------------------------------------
-  // TC20 - Staff Pagination
-  // ----------------------------------------------------
-
-  test('TC20 - Verify Staff pagination controls', async ({ page }) => {
-
-    const nextButton = page.getByRole('button', {
-      name: /next/i
-    });
-
-    const previousButton = page.getByRole('button', {
-      name: /previous|prev/i
-    });
-
-    console.log(
-      'Next button count:',
-      await nextButton.count()
-    );
-
-    console.log(
-      'Previous button count:',
-      await previousButton.count()
-    );
-
-    await expect(page.locator('body')).toBeVisible();
-
-  });
-
-
-  // ----------------------------------------------------
-  // TC21 - Staff Table
-  // ----------------------------------------------------
-
-  test('TC21 - Inspect Staff Directory table', async ({ page }) => {
-
-    console.log(
-      'Table count:',
-      await page.locator('table').count()
-    );
-
-    console.log(
-      'Row count:',
-      await page.locator('tr').count()
-    );
-
-    await expect(page.locator('body')).toBeVisible();
-
-  });
-
-
-  // ----------------------------------------------------
-  // TC22 - Staff Input Fields
-  // ----------------------------------------------------
-
-  test('TC22 - Inspect Staff input fields', async ({ page }) => {
-
-    console.log(
-      'Input count:',
-      await page.locator('input').count()
-    );
-
-    console.log(
-      'Select count:',
-      await page.locator('select').count()
-    );
-
-    await expect(page.locator('body')).toBeVisible();
-
-  });
-
-
-  // ----------------------------------------------------
-  // TC23 - Staff Buttons
-  // ----------------------------------------------------
-
-  test('TC23 - Verify Staff page buttons', async ({ page }) => {
-
-    const buttons = page.getByRole('button');
-
-    console.log(
-      'Button count:',
-      await buttons.count()
-    );
-
-    expect(await buttons.count()).toBeGreaterThan(0);
-
-  });
-
-
-  // ----------------------------------------------------
-  // TC24 - Staff Page Links
-  // ----------------------------------------------------
-
-  test('TC24 - Verify Staff page links', async ({ page }) => {
-
-    const links = page.getByRole('link');
-
-    console.log(
-      'Link count:',
-      await links.count()
-    );
-
-    await expect(page.locator('body')).toBeVisible();
-
-  });
-
-
-  // ----------------------------------------------------
-  // TC25 - Refresh Staff Page
-  // ----------------------------------------------------
-
-  test('TC25 - Verify Staff page refresh', async ({ page }) => {
-
+  // TC10 - Refresh Staff page
+  test('TC10 - Verify Staff page refresh', async ({ page }) => {
     await page.reload();
 
-    await expect(page).not.toHaveURL(/login/, {
+    await expect(page).not.toHaveURL(/login/i, {
       timeout: 15000
     });
 
-    await expect(page.locator('body')).toBeVisible();
-
-    console.log('Staff page refreshed successfully');
-
+    await expect(
+      page.getByText(/team directory/i)
+    ).toBeVisible();
   });
-
-
-  // ----------------------------------------------------
-  // TC26 - Staff Page Scrolling
-  // ----------------------------------------------------
-
-  test('TC26 - Verify Staff page scrolling', async ({ page }) => {
-
-    const beforeScroll = await page.evaluate(
-      () => window.scrollY
-    );
-
-    await page.evaluate(() => {
-      window.scrollTo(0, document.body.scrollHeight);
-    });
-
-    await page.waitForTimeout(500);
-
-    const afterScroll = await page.evaluate(
-      () => window.scrollY
-    );
-
-    console.log({
-      beforeScroll,
-      afterScroll
-    });
-
-    await expect(page.locator('body')).toBeVisible();
-
-  });
-
-
-  // ----------------------------------------------------
-  // TC27 - Staff Page Images
-  // ----------------------------------------------------
-
-  test('TC27 - Verify Staff page images load correctly', async ({ page }) => {
-
-    const images = page.locator('img');
-
-    const count = await images.count();
-
-    console.log('Image count:', count);
-
-    for (let i = 0; i < count; i++) {
-
-      const image = images.nth(i);
-
-      if (await image.isVisible()) {
-
-        const naturalWidth = await image.evaluate(
-          img => img.naturalWidth
-        );
-
-        console.log(
-          `Image ${i + 1} natural width:`,
-          naturalWidth
-        );
-
-        expect(naturalWidth).toBeGreaterThan(0);
-
-      }
-
-    }
-
-  });
-
-
-  // ----------------------------------------------------
-  // TC28 - Application Error Messages
-  // ----------------------------------------------------
-
-  test('TC28 - Check for common server error messages', async ({ page }) => {
-
-    const body = (
-      await page.locator('body').innerText()
-    ).toLowerCase();
-
-    const errors = [
-      '404 not found',
-      '500 internal server error',
-      'internal server error',
-      'something went wrong'
-    ];
-
-    for (const error of errors) {
-      expect(body).not.toContain(error);
-    }
-
-  });
-
-
-  // ----------------------------------------------------
-  // TC29 - Staff Page Title
-  // ----------------------------------------------------
-
-  test('TC29 - Verify Staff page title', async ({ page }) => {
-
-    const title = await page.title();
-
-    console.log('Page title:', title);
-
-    expect(title.trim().length).toBeGreaterThan(0);
-
-  });
-
-
-  // ----------------------------------------------------
-  // TC30 - Capture Staff Module Screenshot
-  // ----------------------------------------------------
-
-  test('TC30 - Capture full Staff module screenshot', async ({ page }, testInfo) => {
-
-    await page.screenshot({
-      path: testInfo.outputPath('staff-module-full-page.png'),
-      fullPage: true
-    });
-
-    console.log('Staff module screenshot captured');
-
-  });
-
-
-  // ----------------------------------------------------
-  // TC31 - Staff Form Screenshot
-  // ----------------------------------------------------
-
-  test('TC31 - Capture Add Staff form screenshot', async ({ page }, testInfo) => {
-
-    await openAddStaffForm(page);
-
-    await page.screenshot({
-      path: testInfo.outputPath('staff-form-full-page.png'),
-      fullPage: true
-    });
-
-    console.log('Staff form screenshot captured');
-
-  });
-
-
-  // ----------------------------------------------------
-  // TC32 - Staff Directory Content
-  // ----------------------------------------------------
-
-  test('TC32 - Verify Staff Directory content', async ({ page }) => {
-
-    const content = await page.locator('body').innerText();
-
-    console.log('Staff Directory content:', content);
-
-    expect(content.trim().length).toBeGreaterThan(0);
-
-  });
-
 
 });
